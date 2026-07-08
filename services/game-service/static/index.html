@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NexusPlay</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>NexusPlay</h1>
+      <p class="tag">Click-target reaction game · powered by AWS</p>
+    </header>
+
+    <section id="join-panel" class="card">
+      <label for="name">Pick a player name</label>
+      <div class="row">
+        <input id="name" type="text" placeholder="your name" maxlength="20" autocomplete="off" />
+        <button id="join-btn">Join</button>
+      </div>
+      <p id="join-msg" class="msg"></p>
+    </section>
+
+    <section id="game-panel" class="card hidden">
+      <div class="hud">
+        <div><span class="lbl">Player</span><span id="hud-name" class="val">—</span></div>
+        <div><span class="lbl">Best</span><span id="hud-best" class="val">0</span></div>
+        <div><span class="lbl">Level</span><span id="hud-level" class="val">1</span></div>
+        <div><span class="lbl">Time</span><span id="hud-time" class="val">10</span>s</div>
+        <div><span class="lbl">Score</span><span id="hud-score" class="val">0</span></div>
+      </div>
+
+      <div id="arena" class="arena" aria-label="game arena">
+        <button id="target" class="target hidden" aria-label="target"></button>
+        <div id="arena-overlay" class="overlay">
+          <button id="start-btn">Start 10s round</button>
+        </div>
+      </div>
+
+      <p id="game-msg" class="msg"></p>
+    </section>
+
+    <section id="leaderboard-panel" class="card">
+      <h2>Leaderboard</h2>
+      <table id="leaderboard">
+        <thead><tr><th>#</th><th>Player</th><th>Best</th><th>Level</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <footer><span id="version"></span></footer>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

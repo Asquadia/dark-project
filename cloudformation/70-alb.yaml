@@ -23,6 +23,9 @@ Parameters:
   AppPort:
     Type: Number
     Default: 8000
+  GrafanaInstanceId:
+    Type: String
+    Default: ""    # set later (Fn::GetAtt on the Grafana instance) — left blank for backwards-compat deploys
 
 Resources:
   GameTG:
@@ -128,6 +131,51 @@ Resources:
       Actions:
         - Type: forward
           TargetGroupArn: !Ref PlayerTG
+
+  GrafanaTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: nexusplay-grafana-tg
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /grafana/api/health
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: grafana }
+
+  # /  (frontend index) + /static/* (assets) → game-service
+  FrontendRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig: { Values: ["/", "/static/*"] }
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GameTG
+
+  # /grafana and /grafana/* → Grafana
+  GrafanaRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 2
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig: { Values: ["/grafana", "/grafana/*"] }
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GrafanaTG
 
 Outputs:
   AlbDnsName:
