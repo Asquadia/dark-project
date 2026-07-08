@@ -49,15 +49,21 @@ def lambda_handler(event, context):
     lt_name, asg_name, svc = service_for_image(short, None)
 
     ecr = boto3.client("ecr")
-    images = ecr.describe_images(repositoryName=repo_name, maxResults=10)["imageDetails"]
-    # Prefer non-:v1 (initial) tag if multiple exist; else latest
+    images = ecr.describe_images(repositoryName=repo_name, maxResults=50)["imageDetails"]
+    # Find the most recently pushed image that has a real version tag (not "latest", not "v1"/seed).
+    # Tags are pushed as [<commit-sha>, "latest"] by the build script; we want the SHA tag.
     chosen = None
     for img in sorted(images, key=lambda i: i.get("imagePushedAt", ""), reverse=True):
-        tags = img.get("imageTags", [])
-        if tags and tags[0] != "latest":
-            chosen = tags[0]; break
-    if chosen is None and images and images[0].get("imageTags"):
-        chosen = images[0]["imageTags"][0]
+        tags = [t for t in img.get("imageTags", []) if t not in ("latest", "v1", "v2")]
+        if tags:
+            chosen = tags[0]
+            break
+    if chosen is None:
+        # fall back to the newest image's first tag
+        for img in sorted(images, key=lambda i: i.get("imagePushedAt", ""), reverse=True):
+            if img.get("imageTags"):
+                chosen = img["imageTags"][0]
+                break
     if chosen is None:
         return {"status": "no-image-tag-found"}
 

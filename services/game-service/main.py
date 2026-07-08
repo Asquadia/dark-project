@@ -103,4 +103,4 @@ def leaderboard():
 def index():
     return FileResponse("static/index.html")
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="static"), name="static")// mer. 08 juil. 2026 15:34:04 CEST
