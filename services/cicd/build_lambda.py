@@ -30,12 +30,15 @@ def get_commit_sha(event):
 
 def build_script(commit_sha):
     """The shell script the build instance will run."""
+    # Use the HTTPS CodeCommit URL with the AWS credential helper (configured in user-data).
+    # The helper authenticates using the instance's LabRole IMDS creds.
+    cc_url = f"https://git-codecommit.us-east-1.amazonaws.com/v1/repos/{CODE_REPO}"
     return f"""#!/bin/bash
 set -e
 export AWS_DEFAULT_REGION={REGION}
 mkdir -p /opt/build && cd /opt/build
 rm -rf nexusplay-app
-git clone --depth 50 codecommit::us-east-1://{CODE_REPO}
+git clone {cc_url} nexusplay-app
 cd nexusplay-app
 git checkout {commit_sha}
 echo "=== Building game-service ==="
