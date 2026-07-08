@@ -14,7 +14,7 @@ def healthz():
 
 @app.get("/version")
 def version():
-    return {"service": "game", "version": VERSION, "build": BUILD, "ts": time.time()}
+    return {"service": "game", "version": VERSION, "build": BUILD, "stage": "ci-cd", "ts": time.time()}
 
 @app.get("/game/state/{player_id}")
 def get_state(player_id: str):

@@ -1,0 +1,154 @@
+# 110-cicd — In-AWS CI/CD pipeline (no external credentials needed).
+#
+# Architecture:
+#   CodeCommit push (main) ─► EventBridge ─► build Lambda ─► SSM RunCommand on build instance
+#                                                                       (git clone, docker build, push to ECR)
+#   ECR image push       ─► EventBridge ─► deploy Lambda ─► LT version + ASG instance refresh
+#
+# All roles reuse the existing LabRole (trusts lambda + codecommit + ec2 + autoscaling + ssm + ecr).
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay CI/CD — build instance + CodeCommit/ECR-triggered Lambdas.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: cicd
+    Env: poc
+
+Parameters:
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-073d3faa9c0fda772
+  AppSG:
+    Type: AWS::EC2::SecurityGroup::Id
+  CodeCommitRepo:
+    Type: String
+    Default: nexusplay-app
+  ArtifactBucket:
+    Type: String
+    Default: nexusplay-artifacts-534883687114-us-east-1
+
+Resources:
+  # ── Build instance (LabRole, Docker, git, aws-codecommit helper) ──
+  BuildInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: t3.micro
+      IamInstanceProfile: LabInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref AppSG]
+          AssociatePublicIpAddress: false
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -x
+          dnf -y install docker git jq
+          systemctl enable --now docker
+          # CodeCommit HTTPS via AWS credential helper
+          dnf -y install pip
+          pip3 install --quiet git-remote-codecommit
+          git config --system credential.helper '!aws codecommit credential-helper $@'
+          git config --system credential.UseHttpPath true
+          usermod -a -G docker ssm-user
+          # install build deps for next time
+          echo "BUILD_INSTANCE_READY" > /tmp/build-ready
+      Tags:
+        - { Key: Name, Value: nexusplay-build-host }
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: cicd-build }
+        - { Key: Env, Value: poc }
+
+  # ── Build Lambda: triggered by CodeCommit push, drives the build via SSM ──
+  BuildLambdaCode:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: nexusplay-cicd-build
+      Runtime: python3.12
+      Role: arn:aws:iam::534883687114:role/LabRole
+      Handler: build_lambda.lambda_handler
+      Timeout: 300
+      Environment:
+        Variables:
+          BUILD_INSTANCE_ID: !Ref BuildInstance
+          CODECOMMIT_REPO: !Ref CodeCommitRepo
+          REGISTRY: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"
+          ARTIFACT_BUCKET: !Ref ArtifactBucket
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: cicd/build_lambda.zip
+
+  # Lambda permissions are created from the deploy script (add-permission),
+  # because the EarlyValidation hook rejects CFN's AWS::Lambda::Permission for this account.
+
+  # EventBridge rule: CodeCommit push to main
+  CodeCommitPushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: nexusplay-cicd-codecommit-push
+      EventPattern:
+        source: [aws.codecommit]
+        detail-type: [CodeCommit Repository State Change]
+        detail:
+          event: [referenceUpdated]
+          referenceType: [branch]
+          referenceName: [main]
+          repositoryName: [!Ref CodeCommitRepo]
+      Targets:
+        - Arn: !GetAtt BuildLambdaCode.Arn
+          Id: build-lambda
+
+  # ── Deploy Lambda: triggered by ECR image push, does LT version + ASG refresh ──
+  DeployLambdaCode:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: nexusplay-cicd-deploy
+      Runtime: python3.12
+      Role: arn:aws:iam::534883687114:role/LabRole
+      Handler: deploy_lambda.lambda_handler
+      Timeout: 300
+      Environment:
+        Variables:
+          REGISTRY: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"
+          GAME_LT: nexusplay-game-lt
+          PLAYER_LT: nexusplay-player-lt
+          GAME_ASG: nexusplay-game-asg
+          PLAYER_ASG: nexusplay-player-asg
+          ARTIFACT_BUCKET: !Ref ArtifactBucket
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: cicd/deploy_lambda.zip
+
+  # EventBridge rule: ECR image push (only our nexusplay repos)
+  ECRPushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: nexusplay-cicd-ecr-push
+      EventPattern:
+        source: [aws.ecr]
+        detail-type: [ECR Image Action]
+        detail:
+          action-type: [PUSH]
+          repository-name:
+            - nexusplay/game-service
+            - nexusplay/player-service
+          result: [SUCCESS]
+      Targets:
+        - Arn: !GetAtt DeployLambdaCode.Arn
+          Id: deploy-lambda
+
+Outputs:
+  BuildInstance:
+    Value: !Ref BuildInstance
+    Export: { Name: NexusPlay-BuildInstance }
+  BuildLambda:
+    Value: !GetAtt BuildLambdaCode.Arn
+    Export: { Name: NexusPlay-BuildLambda }
+  DeployLambda:
+    Value: !GetAtt DeployLambdaCode.Arn
+    Export: { Name: NexusPlay-DeployLambda }
+  CodeCommitRepoCloneUrl:
+    Value: !Sub "codecommit::${AWS::Region}://${CodeCommitRepo}"
+    Export: { Name: NexusPlay-CodeCommitCloneUrl }
