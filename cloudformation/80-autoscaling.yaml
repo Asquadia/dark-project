@@ -1,0 +1,113 @@
+# 80-autoscaling — Target-tracking (CPU 50%), scheduled scale-up for community events,
+# and CloudWatch alarms for high/low CPU.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay auto-scaling — target tracking + scheduled + alarms.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: autoscaling
+    Env: poc
+
+Parameters:
+  GameAsg:
+    Type: String
+    Default: nexusplay-game-asg
+  PlayerAsg:
+    Type: String
+    Default: nexusplay-player-asg
+  AlertTopicArn:
+    Type: String
+    Default: ""
+
+Resources:
+  # ---------- Target tracking: keep avg CPU at 50% ----------
+  GameTargetTracking:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref GameAsg
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+        DisableScaleIn: false
+
+  PlayerTargetTracking:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref PlayerAsg
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+        DisableScaleIn: false
+
+  # ---------- Scheduled actions (community events) ----------
+  # Simulated "community event" peak: scale up at 18:00 UTC, back down at 23:00 UTC.
+  GameScaleUpEvent:
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref GameAsg
+      MinSize: '3'
+      MaxSize: '4'
+      DesiredCapacity: '3'
+      Recurrence: "0 18 * * *"
+
+  GameScaleDownEvent:
+    Type: AWS::AutoScaling::ScheduledAction
+    Properties:
+      AutoScalingGroupName: !Ref GameAsg
+      MinSize: '2'
+      MaxSize: '3'
+      DesiredCapacity: '2'
+      Recurrence: "0 23 * * *"
+
+  # ---------- CloudWatch alarms ----------
+  GameHighCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nexusplay-game-high-cpu
+      AlarmDescription: Game ASG avg CPU > 70% for 5 min
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref GameAsg
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+      OKActions:
+        - !Ref AlertTopicArn
+
+  GameLowCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nexusplay-game-low-cpu
+      AlarmDescription: Game ASG avg CPU < 20% for 20 min (over-provisioned)
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref GameAsg
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 20
+      Threshold: 20
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+      OKActions:
+        - !Ref AlertTopicArn
+
+Outputs:
+  GameTargetTrackingPolicy:
+    Value: !Ref GameTargetTracking
+    Export: { Name: NexusPlay-GameTargetTrackingPolicy }

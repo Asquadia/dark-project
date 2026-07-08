@@ -1,0 +1,86 @@
+# 110-github-oidc — IAM role for GitHub Actions (OIDC). Grants ECR push + ASG refresh + LT update.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: GitHub Actions OIDC role for NexusPlay CI/CD.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: cicd
+    Env: poc
+
+Parameters:
+  GitHubOrgRepo:
+    Type: String
+    Description: "GitHub org/repo that may assume this role (e.g. 'octo-org/nexusplay')."
+    Default: zberrichi/nexusplay
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList:
+        - 6938fd4b98dd03d028eb88eeb1c5d5e69b2e26a7  # github OIDC thumbprint (pin known good)
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nexusplay-github-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: !Ref GitHubOidcProvider }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrgRepo}:*"
+      Policies:
+        - PolicyName: nexusplay-deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRLogin
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: ECRPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                Resource:
+                  - arn:aws:ecr:us-east-1:534883687114:repository/nexusplay/game-service
+                  - arn:aws:ecr:us-east-1:534883687114:repository/nexusplay/player-service
+              - Sid: LaunchTemplateUpdate
+                Effect: Allow
+                Action:
+                  - ec2:CreateLaunchTemplateVersion
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeLaunchTemplateVersions
+                  - ec2:ModifyLaunchTemplate
+                Resource: "arn:aws:ec2:us-east-1:534883687114:launch-template/*"
+              - Sid: ASGInstanceRefresh
+                Effect: Allow
+                Action:
+                  - autoscaling:StartInstanceRefresh
+                  - autoscaling:DescribeInstanceRefreshes
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: "arn:aws:autoscaling:us-east-1:534883687114:autoScalingGroup:*:autoScalingGroupName/nexusplay-*"
+
+Outputs:
+  DeployRoleArn:
+    Value: !GetAtt DeployRole.Arn
+    Export: { Name: NexusPlay-DeployRoleArn }

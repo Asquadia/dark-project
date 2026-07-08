@@ -1,0 +1,98 @@
+# 20-dns — BIND Active/Backup DNS servers for nexusplay.lab
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay DNS — BIND primary (master) + secondary (slave).
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: dns
+    Env: poc
+
+Parameters:
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-073d3faa9c0fda772
+  DnsSG:
+    Type: AWS::EC2::SecurityGroup::Id
+  ArtifactBucket:
+    Type: String
+    Default: nexusplay-artifacts-534883687114-us-east-1
+  VpcCidr:
+    Type: String
+    Default: 172.31.0.0/16
+
+Resources:
+  DnsPrimary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: t3.micro
+      IamInstanceProfile: LabInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref DnsSG]
+          AssociatePublicIpAddress: false
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -x
+            dnf -y --setopt=ip_resolve=IPv4 install awscli bind bind-utils jq cronie
+            mkdir -p /opt/nexusplay-dns
+            aws s3 cp s3://${Bucket}/dns/ /opt/nexusplay-dns/ --recursive --region ${AWS::Region}
+            chmod +x /opt/nexusplay-dns/*.sh
+            export NP_ROLE=primary
+            export NP_ZONE=nexusplay.lab
+            export NP_VPC_CIDR=${VpcCidr}
+            export NP_FORWARDER=169.254.169.253
+            export NP_CACHE_RG=nexusplay-redis
+            export NP_DB_ID=nexusplay-db
+            export NP_ALB_NAME=nexusplay-alb
+            bash /opt/nexusplay-dns/dns-bootstrap.sh > /var/log/nexusplay-bootstrap.log 2>&1 || true
+          - Bucket: !Ref ArtifactBucket
+            VpcCidr: !Ref VpcCidr
+      Tags:
+        - { Key: Name, Value: nexusplay-dns-primary }
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: dns }
+        - { Key: Role, Value: primary }
+        - { Key: Env, Value: poc }
+
+  DnsSecondary:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      InstanceType: t3.micro
+      IamInstanceProfile: LabInstanceProfile
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref DnsSG]
+          AssociatePublicIpAddress: false
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -x
+            dnf -y --setopt=ip_resolve=IPv4 install awscli bind bind-utils jq cronie
+            mkdir -p /opt/nexusplay-dns
+            aws s3 cp s3://${Bucket}/dns/ /opt/nexusplay-dns/ --recursive --region ${AWS::Region}
+            chmod +x /opt/nexusplay-dns/*.sh
+            export NP_ROLE=secondary
+            export NP_ZONE=nexusplay.lab
+            export NP_VPC_CIDR=${VpcCidr}
+            export NP_FORWARDER=169.254.169.253
+            bash /opt/nexusplay-dns/dns-bootstrap.sh > /var/log/nexusplay-bootstrap.log 2>&1 || true
+          - Bucket: !Ref ArtifactBucket
+            VpcCidr: !Ref VpcCidr
+      Tags:
+        - { Key: Name, Value: nexusplay-dns-secondary }
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: dns }
+        - { Key: Role, Value: secondary }
+        - { Key: Env, Value: poc }
+
+Outputs:
+  DnsPrimaryId:   { Value: !Ref DnsPrimary,   Export: { Name: NexusPlay-DnsPrimaryId } }
+  DnsSecondaryId: { Value: !Ref DnsSecondary, Export: { Name: NexusPlay-DnsSecondaryId } }

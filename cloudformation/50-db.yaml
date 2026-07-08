@@ -1,0 +1,63 @@
+# 50-db — RDS PostgreSQL (single-AZ, POC). Password from Secrets Manager.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay database — RDS PostgreSQL single-AZ.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: db
+    Env: poc
+
+Parameters:
+  DbSG:
+    Type: AWS::EC2::SecurityGroup::Id
+  DbSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-073d3faa9c0fda772  # us-east-1a (DB lives here, single-AZ)
+  DbSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-091bd6a245f6d438f  # us-east-1b (required for 2-AZ subnet-group coverage)
+  DbUsername:
+    Type: String
+    Default: nexusplay
+
+Resources:
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: NexusPlay DB subnet group (us-east-1a + us-east-1b)
+      SubnetIds: [!Ref DbSubnet, !Ref DbSubnetB]
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: db }
+
+  DbInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: nexusplay-db
+      Engine: postgres
+      EngineVersion: "17.10"
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:nexusplay-db-password:SecretString}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSG]
+      PubliclyAccessible: false
+      MultiAZ: false
+      StorageEncrypted: true
+      DeletionProtection: false
+      DeleteAutomatedBackups: true
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: db }
+        - { Key: Env, Value: poc }
+
+Outputs:
+  DbEndpoint:
+    Value: !GetAtt DbInstance.Endpoint.Address
+    Export: { Name: NexusPlay-DbEndpoint }
+  DbPort:
+    Value: !GetAtt DbInstance.Endpoint.Port
+    Export: { Name: NexusPlay-DbPort }

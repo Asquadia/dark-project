@@ -1,0 +1,142 @@
+# 60-app — Backend microservices: Launch Templates + ASGs for game-service and player-service.
+# Pulls images from ECR (vpc endpoint), connects to RDS + Redis via the BIND DNS names.
+# No public IPs; app reachable via the ALB (Phase 7).
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay backend — game-service + player-service (ASGs).
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: app
+    Env: poc
+
+Parameters:
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-073d3faa9c0fda772  # us-east-1a
+  AppSG:
+    Type: AWS::EC2::SecurityGroup::Id
+  AppPort:
+    Type: Number
+    Default: 8000
+
+Resources:
+  GameLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: nexusplay-game-lt
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: t3.micro
+        IamInstanceProfile:
+          Name: LabInstanceProfile
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            SubnetId: !Ref SubnetId
+            Groups: [!Ref AppSG]
+            AssociatePublicIpAddress: false
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -x
+            mkdir -p /opt/nexusplay-app
+            aws s3 cp s3://nexusplay-artifacts-534883687114-us-east-1/app/bootstrap.sh /opt/nexusplay-app/app-bootstrap.sh --region ${AWS::Region}
+            chmod +x /opt/nexusplay-app/app-bootstrap.sh
+            export NP_SERVICE=game-service
+            export NP_APP_PORT=${AppPort}
+            export AWS_ACCOUNT_ID=${AWS::AccountId}
+            export NP_IMAGE_TAG=latest
+            export NP_VERSION=v2
+            bash /opt/nexusplay-app/app-bootstrap.sh > /var/log/nexusplay-app-bootstrap.log 2>&1 || true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: nexusplay-game-asg }
+              - { Key: Project, Value: NexusPlay }
+              - { Key: Component, Value: game-service }
+              - { Key: Env, Value: poc }
+
+  GameAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: nexusplay-game-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref GameLaunchTemplate
+        Version: !GetAtt GameLaunchTemplate.LatestVersionNumber
+      MinSize: '2'
+      MaxSize: '3'
+      DesiredCapacity: '2'
+      VPCZoneIdentifier: [!Ref SubnetId]
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:
+        - Fn::ImportValue: NexusPlay-GameTGArn
+      Tags:
+        - Key: Name
+          Value: nexusplay-game-asg
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: NexusPlay
+          PropagateAtLaunch: true
+
+  PlayerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: nexusplay-player-lt
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: t3.micro
+        IamInstanceProfile:
+          Name: LabInstanceProfile
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            SubnetId: !Ref SubnetId
+            Groups: [!Ref AppSG]
+            AssociatePublicIpAddress: false
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -x
+            mkdir -p /opt/nexusplay-app
+            aws s3 cp s3://nexusplay-artifacts-534883687114-us-east-1/app/bootstrap.sh /opt/nexusplay-app/app-bootstrap.sh --region ${AWS::Region}
+            chmod +x /opt/nexusplay-app/app-bootstrap.sh
+            export NP_SERVICE=player-service
+            export NP_APP_PORT=${AppPort}
+            export AWS_ACCOUNT_ID=${AWS::AccountId}
+            export NP_IMAGE_TAG=latest
+            export NP_VERSION=v2
+            bash /opt/nexusplay-app/app-bootstrap.sh > /var/log/nexusplay-app-bootstrap.log 2>&1 || true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: nexusplay-player-asg }
+              - { Key: Project, Value: NexusPlay }
+              - { Key: Component, Value: player-service }
+              - { Key: Env, Value: poc }
+
+  PlayerAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: nexusplay-player-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref PlayerLaunchTemplate
+        Version: !GetAtt PlayerLaunchTemplate.LatestVersionNumber
+      MinSize: '2'
+      MaxSize: '3'
+      DesiredCapacity: '2'
+      VPCZoneIdentifier: [!Ref SubnetId]
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:
+        - Fn::ImportValue: NexusPlay-PlayerTGArn
+      Tags:
+        - Key: Name
+          Value: nexusplay-player-asg
+          PropagateAtLaunch: true
+        - Key: Project
+          Value: NexusPlay
+          PropagateAtLaunch: true
+
+Outputs:
+  GameAsg:   { Value: !Ref GameAsg,   Export: { Name: NexusPlay-GameAsg } }
+  PlayerAsg: { Value: !Ref PlayerAsg, Export: { Name: NexusPlay-PlayerAsg } }

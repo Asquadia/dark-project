@@ -1,0 +1,42 @@
+# 00-foundation — S3 artifact bucket + tagging baseline
+# No IAM roles, no KMS key (LabRole + default keys reused). School-project POC.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay foundation — S3 artifact bucket (shared by CI/CD, load-test reports, logs).
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: foundation
+    Env: poc
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub nexusplay-artifacts-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: foundation }
+        - { Key: Env, Value: poc }
+        - { Key: ManagedBy, Value: CloudFormation }
+
+Outputs:
+  ArtifactBucket:
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: NexusPlay-ArtifactBucket
+  ArtifactBucketArn:
+    Value: !GetAtt ArtifactBucket.Arn
+    Export:
+      Name: NexusPlay-ArtifactBucketArn

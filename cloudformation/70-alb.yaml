@@ -1,0 +1,144 @@
+# 70-alb — Application Load Balancer with path-based routing across the two service ASGs.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay ALB — internet-facing, path-based routing to game + player services.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: alb
+    Env: poc
+
+Parameters:
+  AlbSG:
+    Type: AWS::EC2::SecurityGroup::Id
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-06d792aa2b5ae6ed5
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-073d3faa9c0fda772  # us-east-1a
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-091bd6a245f6d438f  # us-east-1b
+  AppPort:
+    Type: Number
+    Default: 8000
+
+Resources:
+  GameTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: nexusplay-game-tg
+      Port: !Ref AppPort
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: alb }
+
+  PlayerTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: nexusplay-player-tg
+      Port: !Ref AppPort
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: alb }
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: nexusplay-alb
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups: [!Ref AlbSG]
+      Subnets: [!Ref SubnetA, !Ref SubnetB]
+      IpAddressType: ipv4
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: alb }
+        - { Key: Env, Value: poc }
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: application/json
+            MessageBody: '{"error":"no route"}'
+
+  # /game/* → game-service
+  GameRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig: { Values: ["/game/*"] }
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref GameTG
+
+  # /players/* → player-service
+  PlayerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig: { Values: ["/players", "/players/*"] }
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref PlayerTG
+
+  # healthz on root → player-service (simple liveness for the ALB DNS)
+  HealthzRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 5
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig: { Values: ["/healthz"] }
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref PlayerTG
+
+Outputs:
+  AlbDnsName:
+    Value: !GetAtt Alb.DNSName
+    Export: { Name: NexusPlay-AlbDnsName }
+  AlbFullName:
+    Value: !GetAtt Alb.LoadBalancerFullName
+    Export: { Name: NexusPlay-AlbFullName }
+  GameTGArn:
+    Value: !Ref GameTG
+    Export: { Name: NexusPlay-GameTGArn }
+  PlayerTGArn:
+    Value: !Ref PlayerTG
+    Export: { Name: NexusPlay-PlayerTGArn }

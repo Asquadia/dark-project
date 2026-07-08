@@ -1,0 +1,56 @@
+# 40-cache — ElastiCache Redis replication group (primary + 1 read replica, single-AZ)
+# TLS in-transit + at-rest, AUTH token from Secrets Manager.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay cache — Redis replication group.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: cache
+    Env: poc
+
+Parameters:
+  CacheSG:
+    Type: AWS::EC2::SecurityGroup::Id
+  CacheSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-073d3faa9c0fda772  # us-east-1a
+
+Resources:
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: NexusPlay cache subnet group (single AZ us-east-1a)
+      SubnetIds: [!Ref CacheSubnet]
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: cache }
+
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: nexusplay-redis
+      ReplicationGroupDescription: NexusPlay Redis cache (primary + replica)
+      Engine: redis
+      EngineVersion: "7.1"
+      CacheNodeType: cache.t3.micro
+      NumCacheClusters: 2
+      AutomaticFailoverEnabled: false
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds: [!Ref CacheSG]
+      TransitEncryptionEnabled: true
+      AtRestEncryptionEnabled: true
+      AuthToken: !Sub "{{resolve:secretsmanager:nexusplay-redis-auth:SecretString}}"
+      SnapshotRetentionLimit: 0
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: cache }
+        - { Key: Env, Value: poc }
+
+Outputs:
+  RedisPrimaryEndpoint:
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+    Export: { Name: NexusPlay-RedisPrimaryEndpoint }
+  RedisPrimaryPort:
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+    Export: { Name: NexusPlay-RedisPrimaryPort }

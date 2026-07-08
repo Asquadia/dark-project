@@ -1,0 +1,75 @@
+# 100-notifications — SNS topic + email subscription, wire all monitoring alarms to it.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay notifications — SNS topic for operational alerts.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: notifications
+    Env: poc
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email address to receive operational alerts.
+    AllowedPattern: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: nexusplay-alerts
+      DisplayName: NexusPlay Alerts
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: notifications }
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+      TopicArn: !Ref AlertTopic
+
+  # New: ALB 5xx alarm (server-side errors from the load balancer)
+  Alb5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nexusplay-alb-5xx
+      AlarmDescription: ALB returning 5xx > 10 in 5 min
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - { Name: LoadBalancer, Value: app/nexusplay-alb/fbe3e6cf086948b3 }
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  # New: RDS high-connections alarm
+  RdsHighConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nexusplay-rds-high-connections
+      AlarmDescription: RDS connections > 80 for 5 min
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - { Name: DBInstanceIdentifier, Value: nexusplay-db }
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+Outputs:
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+    Export: { Name: NexusPlay-AlertTopicArn }

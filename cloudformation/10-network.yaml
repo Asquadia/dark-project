@@ -1,0 +1,194 @@
+# 10-network — Security groups + VPC interface endpoints + S3 gateway endpoint
+# SGs created empty; rules added as standalone Ingress/Egress resources to avoid
+# circular dependencies between mutually-referencing security groups.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay network — SGs and VPC endpoints.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: network
+    Env: poc
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-06d792aa2b5ae6ed5
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-073d3faa9c0fda772  # us-east-1a
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-091bd6a245f6d438f  # us-east-1b (ALB subnet-AZ2 only)
+  MainRouteTableId:
+    Type: String
+    Default: rtb-021246582323f6e72  # default VPC main route table (has IGW route, associated with all subnets)
+  AppPort:
+    Type: Number
+    Default: 8000
+
+Resources:
+  # ============ Empty security groups ============
+  AlbSG:      { Type: AWS::EC2::SecurityGroup, Properties: { GroupDescription: ALB, VpcId: !Ref VpcId, Tags: [ {Key: Name, Value: nexusplay-alb-sg}, {Key: Project, Value: NexusPlay}, {Key: Component, Value: network} ] } }
+  AppSG:      { Type: AWS::EC2::SecurityGroup, Properties: { GroupDescription: App EC2, VpcId: !Ref VpcId, Tags: [ {Key: Name, Value: nexusplay-app-sg}, {Key: Project, Value: NexusPlay}, {Key: Component, Value: network} ] } }
+  DbSG:       { Type: AWS::EC2::SecurityGroup, Properties: { GroupDescription: RDS, VpcId: !Ref VpcId, Tags: [ {Key: Name, Value: nexusplay-db-sg}, {Key: Project, Value: NexusPlay}, {Key: Component, Value: network} ] } }
+  CacheSG:    { Type: AWS::EC2::SecurityGroup, Properties: { GroupDescription: ElastiCache, VpcId: !Ref VpcId, Tags: [ {Key: Name, Value: nexusplay-cache-sg}, {Key: Project, Value: NexusPlay}, {Key: Component, Value: network} ] } }
+  DnsSG:      { Type: AWS::EC2::SecurityGroup, Properties: { GroupDescription: BIND DNS, VpcId: !Ref VpcId, Tags: [ {Key: Name, Value: nexusplay-dns-sg}, {Key: Project, Value: NexusPlay}, {Key: Component, Value: network} ] } }
+  EndpointSG: { Type: AWS::EC2::SecurityGroup, Properties: { GroupDescription: VPC interface endpoints, VpcId: !Ref VpcId, Tags: [ {Key: Name, Value: nexusplay-endpoint-sg}, {Key: Project, Value: NexusPlay}, {Key: Component, Value: network} ] } }
+
+  # ============ Ingress rules ============
+  AlbInHttp:    { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt AlbSG.GroupId, IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 } }
+  AppInFromAlb: { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: tcp, FromPort: !Ref AppPort, ToPort: !Ref AppPort, SourceSecurityGroupId: !GetAtt AlbSG.GroupId } }
+  AppInSelf:    { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: tcp, FromPort: !Ref AppPort, ToPort: !Ref AppPort, SourceSecurityGroupId: !GetAtt AppSG.GroupId, Description: SSM port-forward probes } }
+  DbInFromApp:  { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt DbSG.GroupId, IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !GetAtt AppSG.GroupId } }
+  CacheInFromApp:  { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt CacheSG.GroupId, IpProtocol: tcp, FromPort: 6379, ToPort: 6379, SourceSecurityGroupId: !GetAtt AppSG.GroupId, Description: from app } }
+  CacheInSelf6379: { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt CacheSG.GroupId, IpProtocol: tcp, FromPort: 6379, ToPort: 6379, SourceSecurityGroupId: !GetAtt CacheSG.GroupId, Description: replication } }
+  CacheInSelfBus:  { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt CacheSG.GroupId, IpProtocol: tcp, FromPort: 16379, ToPort: 16379, SourceSecurityGroupId: !GetAtt CacheSG.GroupId, Description: cluster bus } }
+  DnsInFromAppTcp: { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: tcp, FromPort: 53, ToPort: 53, SourceSecurityGroupId: !GetAtt AppSG.GroupId } }
+  DnsInFromAppUdp: { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: udp, FromPort: 53, ToPort: 53, SourceSecurityGroupId: !GetAtt AppSG.GroupId } }
+  DnsInSelf53:     { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: tcp, FromPort: 53, ToPort: 53, SourceSecurityGroupId: !GetAtt DnsSG.GroupId, Description: AXFR + sync } }
+  DnsInSelf53Udp:  { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: udp, FromPort: 53, ToPort: 53, SourceSecurityGroupId: !GetAtt DnsSG.GroupId, Description: DNS UDP self-ref } }
+  DnsInSelfRndc:   { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: tcp, FromPort: 953, ToPort: 953, SourceSecurityGroupId: !GetAtt DnsSG.GroupId, Description: rndc } }
+  EndpointInFromApp: { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt EndpointSG.GroupId, IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !GetAtt AppSG.GroupId } }
+  EndpointInFromDns: { Type: AWS::EC2::SecurityGroupIngress, Properties: { GroupId: !GetAtt EndpointSG.GroupId, IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !GetAtt DnsSG.GroupId } }
+
+  # ============ Egress rules ============
+  # Note: CFN creates SGs with default allow-all egress. We add explicit rules so the
+  # defaults remain (Amazon Linux needs broad S3/dnf egress via the gateway endpoint which
+  # is route-table based and not SG-restricted, so default egress is fine to keep).
+  AlbEgToApp: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt AlbSG.GroupId, IpProtocol: tcp, FromPort: !Ref AppPort, ToPort: !Ref AppPort, DestinationSecurityGroupId: !GetAtt AppSG.GroupId } }
+  AppEgToEndpoints: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationSecurityGroupId: !GetAtt EndpointSG.GroupId, Description: SSM/ECR/Secrets/Logs endpoints } }
+  AppEgToDb:    { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: tcp, FromPort: 5432, ToPort: 5432, DestinationSecurityGroupId: !GetAtt DbSG.GroupId } }
+  AppEgToCache: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: tcp, FromPort: 6379, ToPort: 6379, DestinationSecurityGroupId: !GetAtt CacheSG.GroupId } }
+  AppEgToDnsTcp: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: tcp, FromPort: 53, ToPort: 53, DestinationSecurityGroupId: !GetAtt DnsSG.GroupId } }
+  AppEgToDnsUdp: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: udp, FromPort: 53, ToPort: 53, DestinationSecurityGroupId: !GetAtt DnsSG.GroupId } }
+  # S3 prefix list egress — covers dnf + aws s3 cp via the S3 gateway endpoint
+  AppEgToS3: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt AppSG.GroupId, IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationPrefixListId: pl-63a5400a, Description: S3 gateway (dnf + scripts) } }
+  DnsEgToEndpoints: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationSecurityGroupId: !GetAtt EndpointSG.GroupId, Description: EC2 API + SSM } }
+  DnsEgDns53Tcp: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: tcp, FromPort: 53, ToPort: 53, CidrIp: 0.0.0.0/0, Description: forward upstream } }
+  DnsEgDns53Udp: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: udp, FromPort: 53, ToPort: 53, CidrIp: 0.0.0.0/0, Description: forward upstream } }
+  # S3 prefix list egress — for aws s3 cp of scripts + dnf
+  DnsEgToS3: { Type: AWS::EC2::SecurityGroupEgress, Properties: { GroupId: !GetAtt DnsSG.GroupId, IpProtocol: tcp, FromPort: 443, ToPort: 443, DestinationPrefixListId: pl-63a5400a, Description: S3 gateway (dnf + scripts) } }
+
+  # ============ VPC endpoints ============
+  # S3 gateway endpoint attached to the EXISTING default VPC main route table
+  # (which already has the IGW route and is associated with all subnets — safest).
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref MainRouteTableId]
+
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  Ec2Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.api"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ecr.dkr"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  ElasticacheEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticache"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  RdsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.rds"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+  ElasticloadbalancingEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticloadbalancing"
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PublicSubnetA]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+
+Outputs:
+  VpcId: { Value: !Ref VpcId, Export: { Name: NexusPlay-VpcId } }
+  PublicSubnetA: { Value: !Ref PublicSubnetA, Export: { Name: NexusPlay-PublicSubnetA } }
+  PublicSubnetB: { Value: !Ref PublicSubnetB, Export: { Name: NexusPlay-PublicSubnetB } }
+  AppPort: { Value: !Ref AppPort, Export: { Name: NexusPlay-AppPort } }
+  AlbSG: { Value: !Ref AlbSG, Export: { Name: NexusPlay-AlbSG } }
+  AppSG: { Value: !Ref AppSG, Export: { Name: NexusPlay-AppSG } }
+  DbSG: { Value: !Ref DbSG, Export: { Name: NexusPlay-DbSG } }
+  CacheSG: { Value: !Ref CacheSG, Export: { Name: NexusPlay-CacheSG } }
+  DnsSG: { Value: !Ref DnsSG, Export: { Name: NexusPlay-DnsSG } }
+  EndpointSG: { Value: !Ref EndpointSG, Export: { Name: NexusPlay-EndpointSG } }

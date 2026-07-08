@@ -1,0 +1,123 @@
+# 90-monitoring — Unified CloudWatch dashboard + log group.
+# Metrics that already exist (no agent needed):
+#   - ALB RequestCount / HTTPCode_ELB_5XX / TargetResponseTime (AWS/ApplicationELB)
+#   - ASG CPUUtilization (AWS/EC2, dimension AutoScalingGroupName)
+#   - ElastiCache CPUUtilization / FreeMemory / CurrConnections (AWS/ElastiCache)
+#   - RDS CPUUtilization / DatabaseConnections / FreeStorageSpace (AWS/RDS)
+# Logs from app instances are collected by the CloudWatch agent (installed by SSM association in the app user-data is out of scope here; we create the destination log group + dashboard).
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NexusPlay monitoring — unified CloudWatch dashboard + log group + app log metric filter.
+
+Metadata:
+  NexusPlay:
+    Project: NexusPlay
+    Component: monitoring
+    Env: poc
+
+Parameters:
+  AlbFullName:
+    Type: String
+  GameAsg:
+    Type: String
+    Default: nexusplay-game-asg
+  PlayerAsg:
+    Type: String
+    Default: nexusplay-player-asg
+  RedisRG:
+    Type: String
+    Default: nexusplay-redis
+  DbId:
+    Type: String
+    Default: nexusplay-db
+  AlertTopicArn:
+    Type: String
+    Default: ""
+
+Resources:
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/nexusplay/app
+      RetentionInDays: 14
+      Tags:
+        - { Key: Project, Value: NexusPlay }
+        - { Key: Component, Value: monitoring }
+
+  # Metric filter: count 5xx app errors from log lines containing "ERROR"
+  AppErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref AppLogGroup
+      FilterPattern: "ERROR"
+      MetricTransformations:
+        - MetricValue: "1"
+          MetricNamespace: NexusPlay/App
+          MetricName: AppErrors
+
+  AppErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nexusplay-app-errors
+      AlarmDescription: App errors > 5 in 5 min
+      Namespace: NexusPlay/App
+      MetricName: AppErrors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopicArn
+      OKActions:
+        - !Ref AlertTopicArn
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: NexusPlay
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            { "type":"metric", "x":0, "y":0, "width":12, "height":6, "properties":{
+                "title":"ALB — Requests per minute",
+                "metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","${AlbFullName}",{"stat":"Sum","period":60}]],
+                "view":"timeSeries","region":"us-east-1"}},
+            { "type":"metric", "x":12, "y":0, "width":12, "height":6, "properties":{
+                "title":"ALB — 5xx responses",
+                "metrics":[["AWS/ApplicationELB","HTTPCode_ELB_5XX_Count","LoadBalancer","${AlbFullName}",{"stat":"Sum","period":60}],
+                           [".","HTTPCode_Target_5XX_Count",".",".",{"stat":"Sum","period":60}]],
+                "view":"timeSeries","region":"us-east-1"}},
+            { "type":"metric", "x":0, "y":6, "width":12, "height":6, "properties":{
+                "title":"ASG — CPU utilization",
+                "metrics":[["AWS/EC2","CPUUtilization","AutoScalingGroupName","${GameAsg}",{"stat":"Average","period":60}],
+                           [".",".",".","${PlayerAsg}",{"stat":"Average","period":60}]],
+                "view":"timeSeries","region":"us-east-1"}},
+            { "type":"metric", "x":12, "y":6, "width":12, "height":6, "properties":{
+                "title":"ASG — instance count (desired vs in-service)",
+                "metrics":[["AWS/AutoScaling","GroupDesiredCapacity","AutoScalingGroupName","${GameAsg}",{"stat":"Maximum","period":60}],
+                           [".","GroupInServiceInstances",".",".",{"stat":"Maximum","period":60}],
+                           [".","GroupDesiredCapacity",".","${PlayerAsg}",{"stat":"Maximum","period":60}],
+                           [".","GroupInServiceInstances",".",".",{"stat":"Maximum","period":60}]],
+                "view":"timeSeries","region":"us-east-1"}},
+            { "type":"metric", "x":0, "y":12, "width":12, "height":6, "properties":{
+                "title":"ElastiCache — CPU & free memory",
+                "metrics":[["AWS/ElastiCache","CPUUtilization","CacheClusterId","${RedisRG}-001",{"stat":"Average","period":60}],
+                           [".","FreeableMemory",".",".",{"stat":"Average","period":60}]],
+                "view":"timeSeries","region":"us-east-1"}},
+            { "type":"metric", "x":12, "y":12, "width":12, "height":6, "properties":{
+                "title":"RDS — CPU & connections & free storage",
+                "metrics":[["AWS/RDS","CPUUtilization","DBInstanceIdentifier","${DbId}",{"stat":"Average","period":60}],
+                           [".","DatabaseConnections",".",".",{"stat":"Sum","period":60}],
+                           [".","FreeStorageSpace",".",".",{"stat":"Average","period":60}]],
+                "view":"timeSeries","region":"us-east-1"}},
+            { "type":"metric", "x":0, "y":18, "width":24, "height":6, "properties":{
+                "title":"App errors (from CloudWatch log metric filter)",
+                "metrics":[["NexusPlay/App","AppErrors",{"stat":"Sum","period":60}]],
+                "view":"timeSeries","region":"us-east-1"}}
+          ]
+        }
+
+Outputs:
+  AppLogGroup: { Value: !Ref AppLogGroup, Export: { Name: NexusPlay-AppLogGroup } }
+  Dashboard:   { Value: !Ref Dashboard,   Export: { Name: NexusPlay-Dashboard } }

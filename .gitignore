@@ -1,0 +1,16 @@
+# AWS credentials and lab secrets — NEVER commit
+.aws/
+creds
+labsuser.pem
+labsuser.ppk
+ssourl.txt
+*.pem
+*.ppk
+.env
+.env.aws
+setenv.sh
+
+# Local state / scratch
+*.tfstate
+*.tfstate.*
+scratch/
