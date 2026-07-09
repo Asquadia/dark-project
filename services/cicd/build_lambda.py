@@ -43,6 +43,7 @@ GIT_SSH_COMMAND="ssh -o IdentitiesOnly=yes -i /root/.ssh/id_ed25519" \\
   git clone {CLONE_URL} dark-project
 cd dark-project
 git checkout {commit_sha}
+aws ecr get-login-password --region {REGION} | docker login --username AWS --password-stdin {REGISTRY}
 echo "=== Building game-service ==="
 docker build -t {REGISTRY}/nexusplay/game-service:{commit_sha} -f services/game-service/Dockerfile services
 docker tag  {REGISTRY}/nexusplay/game-service:{commit_sha} {REGISTRY}/nexusplay/game-service:latest

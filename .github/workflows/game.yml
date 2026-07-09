@@ -1,0 +1,230 @@
+name: NexusPlay — game-service CI/CD
+
+# ── Triggers ────────────────────────────────────────────────────────────────────
+# Builds the game-service image, tags it, pushes to GitHub Container Registry
+# (canonical) and mirrors it to Amazon ECR (because lab game instances are in
+# a private subnet with no internet egress and cannot reach ghcr.io).
+# Then tells the AWS lab game instances to pull from ECR + restart via SSM.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/game-service/**'
+      - 'services/common/**'
+      - '.github/workflows/game.yml'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (default: git short SHA). Use "latest" to redeploy the most recent push.'
+        required: false
+        default: ''
+
+# One run at a time per branch — avoid racing container restarts.
+concurrency:
+  group: game-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # OIDC → AWS STS short-lived credentials
+  packages: write   # push to ghcr.io
+
+env:
+  # Canonical source of truth (public — visible to anyone who owns the package)
+  GHCR_REGISTRY: ghcr.io/${{ github.repository_owner }}/game-service
+  # Mirror the lab instances actually pull from (private subnet, no internet)
+  ECR_REGISTRY: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/nexusplay/game-service
+  SERVICE: game-service
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "534883687114"
+  ARTIFACTS_BUCKET: nexusplay-artifacts-534883687114-us-east-1
+  # GHCR_PAT_SECRET is no longer needed (ECR is reachable via VPC endpoint).
+  # Kept here as a config reference; redeploying the secret is optional.
+  GHCR_PAT_SECRET: nexusplay-ghcr-pull-token
+
+jobs:
+  # ── Build & push (GHCR canonical + ECR mirror) ───────────────────────────────
+  build:
+    name: Build + push (GHCR + ECR mirror)
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag:  ${{ steps.meta.outputs.image_tag }}
+      ecr_image:  ${{ env.ECR_REGISTRY }}:${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive image tag
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG="${INPUT_TAG:-${SHORT_SHA}}"
+          echo "image_tag=${TAG}" >>"$GITHUB_OUTPUT"
+        env:
+          INPUT_TAG: ${{ github.event.inputs.image_tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GHCR auth: workflow GITHUB_TOKEN already has packages:write from `permissions`.
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ECR auth: defer to the deploy-job OIDC step's creds by reusing this job.
+      - name: Configure AWS credentials (OIDC) — for ECR login
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, push to GHCR + ECR
+        run: |
+          TAG="${{ steps.meta.outputs.image_tag }}"
+          # Build once, then re-tag the same image for both registries.
+          docker build \
+            -t "${GHCR_REGISTRY}:${TAG}" \
+            -t "${GHCR_REGISTRY}:latest" \
+            -f services/game-service/Dockerfile \
+            services
+          docker push "${GHCR_REGISTRY}:${TAG}"
+          docker push "${GHCR_REGISTRY}:latest"
+          echo "✓ GHCR: ${GHCR_REGISTRY}:${TAG} + :latest"
+
+          # Mirror to ECR so lab instances (private subnet, no internet) can pull.
+          docker tag "${GHCR_REGISTRY}:${TAG}" "${ECR_REGISTRY}:${TAG}"
+          docker tag "${GHCR_REGISTRY}:${TAG}" "${ECR_REGISTRY}:latest"
+          docker push "${ECR_REGISTRY}:${TAG}"
+          docker push "${ECR_REGISTRY}:latest"
+          echo "✓ ECR: ${ECR_REGISTRY}:${TAG} + :latest"
+
+  # ── Deploy to AWS lab (instances pull from ECR via VPC endpoint) ──────────────
+  deploy:
+    name: Deploy to lab (SSM pull + restart)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Find running game instances
+        id: instances
+        run: |
+          IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=nexusplay-game-*" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[*].Instances[*].InstanceId' --output text)
+          if [ -z "${IDS}" ]; then
+            echo "No running game instances found." >&2
+            exit 1
+          fi
+          echo "instance_ids=${IDS}" >>"$GITHUB_OUTPUT"
+          echo "Found game instances: ${IDS}"
+
+      - name: Upload restart script to S3
+        run: |
+          cat > /tmp/restart-game.sh <<'SCRIPT'
+          #!/bin/bash
+          # restart-game.sh — runs on each game instance via SSM.
+          # Pulls from ECR (reachable via VPC endpoint; ghcr.io is NOT reachable
+          # because lab instances are in a private subnet with no NAT).
+          set -eu
+          IMAGE_TAG="${1:?usage: restart-game.sh <image_tag>}"
+          REGION="${AWS_REGION:-us-east-1}"
+          REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+          IMAGE="${REGISTRY}/nexusplay/game-service:${IMAGE_TAG}"
+
+          echo "[deploy] image=${IMAGE}"
+          echo "[deploy] logging into ECR via VPC endpoint ..."
+          aws ecr get-login-password --region "${REGION}" \
+            | docker login --username AWS --password-stdin "${REGISTRY}"
+
+          echo "[deploy] pulling ${IMAGE} ..."
+          docker pull "${IMAGE}"
+
+          echo "[deploy] restarting container ..."
+          docker rm -f nexusplay-game-service 2>/dev/null || true
+          docker run -d --restart=always --name nexusplay-game-service \
+            --env REDIS_HOST=redis.nexusplay.lab \
+            --env REDIS_PORT=6379 \
+            --env DB_HOST=db.nexusplay.lab \
+            --env DB_PORT=5432 \
+            --env DB_USER=nexusplay \
+            --env DB_NAME=postgres \
+            --env AWS_DEFAULT_REGION="${REGION}" \
+            -p 8000:8000 \
+            "${IMAGE}"
+
+          echo "[deploy] container running:"
+          docker ps --filter name=nexusplay-game-service --format '{{.Image}} {{.Status}}'
+          SCRIPT
+          aws s3 cp /tmp/restart-game.sh \
+            "s3://${ARTIFACTS_BUCKET}/game/restart-game.sh"
+
+      - name: Trigger restart on each game instance
+        id: ssm
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          # Build the SSM --parameters JSON via jq so we don't fight YAML/bash quoting.
+          PAYLOAD=$(jq -nc \
+            --arg bucket "${ARTIFACTS_BUCKET}" \
+            --arg region "${AWS_REGION}" \
+            --arg acct "${AWS_ACCOUNT_ID}" \
+            --arg tag "${IMAGE_TAG}" \
+            '{commands: [
+              ("aws s3 cp s3://" + $bucket + "/game/restart-game.sh /tmp/restart-game.sh"),
+              ("AWS_REGION=" + $region + " AWS_ACCOUNT_ID=" + $acct + " bash /tmp/restart-game.sh " + $tag)
+            ]}')
+
+          for INSTANCE in ${{ steps.instances.outputs.instance_ids }}; do
+            echo "=== deploying to ${INSTANCE} (tag=${IMAGE_TAG}) ==="
+            CMD_ID=$(aws ssm send-command \
+              --instance-ids "${INSTANCE}" \
+              --document-name "AWS-RunShellScript" \
+              --parameters "${PAYLOAD}" \
+              --timeout-seconds 180 \
+              --query 'Command.CommandId' --output text)
+            echo "  ssm command id: ${CMD_ID}"
+          done
+
+      - name: Wait for restarts to finish + verify
+        run: |
+          sleep 20
+          VERIFY_PAYLOAD=$(jq -nc '{commands: [
+            "docker ps --filter name=nexusplay-game-service --format \"{{.Image}} {{.Status}}\"",
+            "curl -sf http://localhost:8000/healthz -o /dev/null && echo HEALTH_OK || echo HEALTH_FAIL"
+          ]}')
+          for INSTANCE in ${{ steps.instances.outputs.instance_ids }}; do
+            echo "=== verify on ${INSTANCE} ==="
+            CMD_ID=$(aws ssm send-command \
+              --instance-ids "${INSTANCE}" \
+              --document-name "AWS-RunShellScript" \
+              --parameters "${VERIFY_PAYLOAD}" \
+              --query 'Command.CommandId' --output text)
+            sleep 4
+            aws ssm get-command-invocation \
+              --command-id "${CMD_ID}" --instance-id "${INSTANCE}" \
+              --query 'StandardOutputContent' --output text | sed 's/^/  /'
+          done
+
+      - name: Summary
+        run: |
+          echo "## Deployment summary" >>"$GITHUB_STEP_SUMMARY"
+          echo "" >>"$GITHUB_STEP_SUMMARY"
+          echo "| Item | Value |" >>"$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >>"$GITHUB_STEP_SUMMARY"
+          echo "| GHCR (canonical) | \`${{ env.GHCR_REGISTRY }}:${{ needs.build.outputs.image_tag }}\` |" >>"$GITHUB_STEP_SUMMARY"
+          echo "| ECR (lab mirror)  | \`${{ env.ECR_REGISTRY }}:${{ needs.build.outputs.image_tag }}\` |" >>"$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >>"$GITHUB_STEP_SUMMARY"
+          echo "| Instances | \`${{ steps.instances.outputs.instance_ids }}\` |" >>"$GITHUB_STEP_SUMMARY"
+          echo "" >>"$GITHUB_STEP_SUMMARY"
+          echo "GHCR package: https://github.com/${{ github.repository }}/packages" >>"$GITHUB_STEP_SUMMARY"
