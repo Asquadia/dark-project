@@ -85,6 +85,9 @@ $ aws autoscaling describe-auto-scaling-groups \
 ]
 ```
 
+L'augmentation de la capacité et la charge CPU peuvent également être visualisées sur le dashboard :
+![Autoscaling Dashboard](./docs/autoscaling.png)
+
 ---
 
 ## 4. Monitoring centralisé
