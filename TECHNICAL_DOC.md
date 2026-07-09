@@ -23,10 +23,10 @@ Les images Docker sont stockées dans des dépôts Elastic Container Registry (E
 $ aws ecr describe-repositories --query 'repositories[*].repositoryName' --output text
 nexusplay/game-service    nexusplay/player-service
 
-$ curl -s http://<ALB_URL>/version
+$ curl -s http://nexusplay-alb-1309462050.us-east-1.elb.amazonaws.com/version
 {"service":"game","version":"v2","build":"local","stage":"ci-cd","ts":1752076432.1}
 
-$ curl -s http://<ALB_URL>/players/1
+$ curl -s http://nexusplay-alb-1309462050.us-east-1.elb.amazonaws.com/players/1
 {"player": {"id": 1, "name": "test-player", "level": 1}}
 ```
 
@@ -48,11 +48,11 @@ La redondance est garantie par le déploiement sur deux zones de disponibilité 
 L'ALB identifie correctement l'état des instances sous-jacentes. En cas d'arrêt d'un conteneur, l'instance est marquée comme `unhealthy`.
 ```bash
 $ aws elbv2 describe-target-health \
-    --target-group-arn arn:aws:elasticloadbalancing:...:targetgroup/nexusplay-game-tg/... \
+    --target-group-arn arn:aws:elasticloadbalancing:us-east-1:534883687114:targetgroup/nexusplay-game-tg/d8a59646fac2e2d4 \
     --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' --output table
 -----------------------------------
-|  i-0abc12345678  |  healthy  |
-|  i-0def87654321  |  healthy  |
+|  i-0632d5c5d30375f8b  |  healthy  |
+|  i-08656336a93101d3a  |  healthy  |
 -----------------------------------
 ```
 
@@ -74,14 +74,14 @@ Suite à une saturation CPU volontaire (via l'utilitaire `stress-ng`), l'ASG ajo
 $ aws autoscaling describe-scaling-activities \
     --auto-scaling-group-name nexusplay-game-asg \
     --query 'Activities[0].[Cause,StatusCode]' --output text
-At 2026-07-08T..., a monitor alarm TargetTracking-nexusplay-game-asg-AlarmHigh... transitioned to ALARM state. Launching a new EC2 instance: i-087afed10048b3df8    Successful
+At 2026-07-08T..., a monitor alarm TargetTracking-nexusplay-game-asg-AlarmHigh... transitioned to ALARM state. Launching a new EC2 instance: i-091d078acb52ebba2    Successful
 
 $ aws autoscaling describe-auto-scaling-groups \
     --auto-scaling-group-names nexusplay-game-asg \
     --query 'AutoScalingGroups[0].[DesiredCapacity,Instances[*].InstanceId]'
 [
   3,
-  ["i-0abc12345678", "i-0def87654321", "i-087afed10048b3df8"]
+  ["i-0632d5c5d30375f8b", "i-08656336a93101d3a", "i-091d078acb52ebba2"]
 ]
 ```
 
@@ -106,7 +106,7 @@ L'observabilité de l'infrastructure est centralisée dans Amazon CloudWatch :
 Vérification des flux de logs collectés par instance :
 ```bash
 $ aws logs describe-log-streams --log-group-name /aws/nexusplay/app --query 'logStreams[*].logStreamName' --output text
-i-0abc12345678  i-0def87654321
+i-06f474c8d1df27523
 
 $ aws logs filter-log-events --log-group-name /aws/nexusplay/app --limit 1 --query 'events[0].message'
 "{\"log\":\"INFO: 172.31.33.112 - \\\"GET /healthz HTTP/1.1\\\" 200 OK\\n\"}"
@@ -163,18 +163,18 @@ Le cluster est composé d'un nœud primaire et d'un réplica. Les échanges sont
 L'impact du pattern cache-aside est observable lors d'appels consécutifs :
 ```bash
 # Premier appel : Cache Miss
-$ curl -s http://<ALB_URL>/game/state/1 | jq .source
+$ curl -s http://nexusplay-alb-1309462050.us-east-1.elb.amazonaws.com/game/state/1 | jq .source
 "db"
 
 # Second appel : Cache Hit
-$ curl -s http://<ALB_URL>/game/state/1 | jq .source
+$ curl -s http://nexusplay-alb-1309462050.us-east-1.elb.amazonaws.com/game/state/1 | jq .source
 "cache"
 
 # Mise à jour de l'état (invalidation)
-$ curl -s -X POST http://<ALB_URL>/game/move/1 -d '{"score": 42}' > /dev/null
+$ curl -s -X POST http://nexusplay-alb-1309462050.us-east-1.elb.amazonaws.com/game/move/1 -d '{"score": 42}' > /dev/null
 
 # L'appel suivant retourne sur la base de données
-$ curl -s http://<ALB_URL>/game/state/1 | jq .source
+$ curl -s http://nexusplay-alb-1309462050.us-east-1.elb.amazonaws.com/game/state/1 | jq .source
 "db"
 ```
 
@@ -196,7 +196,7 @@ La récupération des secrets fonctionne correctement depuis l'environnement AWS
 ```bash
 # Récupération de la valeur du secret par l'API AWS
 $ aws secretsmanager get-secret-value --secret-id nexusplay-db-password --query 'SecretString' --output text
-<mot_de_passe_genere_aleatoirement>
+XrFkTWRtUj0Puo1YfC6xB8trg7JchAtc
 ```
 
 ---
@@ -219,10 +219,10 @@ Le topic de notification est configuré et lié aux alarmes d'infrastructure.
 ```bash
 # L'alarme ALB 5xx est bien configurée avec l'action SNS appropriée
 $ aws cloudwatch describe-alarms --alarm-names nexusplay-alb-5xx --query 'MetricAlarms[0].AlarmActions' --output text
-arn:aws:sns:us-east-1:<AccountID>:nexusplay-alerts
+arn:aws:sns:us-east-1:534883687114:nexusplay-alerts
 
 # Confirmation de l'abonnement email
-$ aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:us-east-1:<AccountID>:nexusplay-alerts --query 'Subscriptions[*].Protocol' --output text
+$ aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:us-east-1:534883687114:nexusplay-alerts --query 'Subscriptions[*].Protocol' --output text
 email
 ```
 
@@ -246,9 +246,9 @@ Le DNS interne permet de résoudre correctement l'ensemble des ressources privé
 ```bash
 # Test de résolution via le serveur primaire (172.31.33.112)
 $ dig @172.31.33.112 db.nexusplay.lab +short
-172.31.A.B
+nexusplay-db.c8uabg0f8uik.us-east-1.rds.amazonaws.com.
 
 # Test de résolution via le serveur secondaire (172.31.41.135)
 $ dig @172.31.41.135 redis.nexusplay.lab +short
-172.31.X.Y
+master.nexusplay-redis.ihxq5t.use1.cache.amazonaws.com.
 ```
